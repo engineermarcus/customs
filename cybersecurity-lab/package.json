@@ -11,6 +11,7 @@
   "license": "ISC",
   "dependencies": {
     "axios": "^1.19.0",
+    "dns2": "^3.1.1",
     "express": "^5.2.1"
   }
 }
