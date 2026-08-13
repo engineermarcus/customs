@@ -1,0 +1,6 @@
+# METHOD UNKNOWN — endpoint detected but HTTP method could not be inferred.
+# Endpoint : /title
+# Method   : unknown
+#
+# Example (browser flow):
+#   open https://cybernetics.afrimergetech.com/title

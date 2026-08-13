@@ -1,0 +1,4 @@
+curl -s -X DELETE \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer <your_token>' \
+  'https://cybernetics.afrimergetech.com/api/conversations/'

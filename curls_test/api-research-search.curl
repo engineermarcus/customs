@@ -1,0 +1,6 @@
+curl -s -X POST \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer <your_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"query":""}' \
+  'https://cybernetics.afrimergetech.com/api/research/search'

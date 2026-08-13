@@ -1,0 +1,4 @@
+curl -s -X GET \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer <your_token>' \
+  'https://cybernetics.afrimergetech.com/api/files/download?path='

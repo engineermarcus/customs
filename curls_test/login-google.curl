@@ -1,0 +1,6 @@
+# BROWSER FLOW — open this URL directly in a browser, not curl.
+# Endpoint : /login/google
+# Method   : GET
+#
+# Example (browser flow):
+#   open https://cybernetics.afrimergetech.com/login/google

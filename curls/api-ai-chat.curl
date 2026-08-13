@@ -1,0 +1,6 @@
+curl -s --no-buffer -X POST \
+  -H 'Accept: text/event-stream' \
+  -H 'Authorization: Bearer <your_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":"","t":"","chatId":"","modelIndex":""}' \
+  'https://cybernetics.afrimergetech.com/api/ai/chat'

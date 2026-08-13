@@ -1,0 +1,6 @@
+curl -s -X PATCH \
+  -H 'Accept: application/json' \
+  -H 'Authorization: Bearer <your_token>' \
+  -H 'Content-Type: application/json' \
+  -d '{"picture":"","displayName":""}' \
+  'https://cybernetics.afrimergetech.com/api/profile'
